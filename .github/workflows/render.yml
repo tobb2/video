@@ -1,0 +1,84 @@
+name: Crossfade Videos Parallel
+
+on:
+  workflow_dispatch:
+    inputs:
+      input_link:
+        description: 'Folder chứa video'
+        default: 'clips'
+      output_file:
+        description: 'Prefix file output'
+        default: 'output'
+
+jobs:
+  crossfade:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Install FFmpeg
+        run: sudo apt update && sudo apt install -y ffmpeg
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies from requirements.txt
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+        
+      - name: render
+        run: |
+          python3 << 'EOF'
+            import subprocess, json, os
+            import gdown
+
+            video_dir = 'clips'
+            os.makedirs(video_dir, exist_ok=True)
+
+            # URL hoặc folder ID từ input GitHub Actions
+            drive_url = '${{ github.event.inputs.input_link }}'
+
+            # Tải toàn bộ folder public từ Google Drive
+            gdown.download_folder(url=drive_url, output=video_dir, quiet=False)
+
+            # Hàm lấy duration của 1 video
+            def dur(path):
+                probe = subprocess.run(
+                    ['ffprobe','-v','quiet','-print_format','json','-show_format','-show_streams', path],
+                    capture_output=True, text=True, check=True
+                )
+                info = json.loads(probe.stdout)
+                return float(info['format']['duration'])
+
+            # Hàm render video với crossfade
+            def render(paths, overlap=1, out='output.mp4'):
+                inputs = sum([['-i',p] for p in paths], [])
+                filters, vprev, offset = [], '0:v', dur(paths[0]) - overlap
+
+                for i in range(1,len(paths)):
+                    vcur, vout = f'{i}:v', f'v{i}'
+                    filters.append(f'[{vprev}][{vcur}] xfade=transition=fade:duration={overlap}:offset={offset} [{vout}]')
+                    vprev = vout
+                    if i < len(paths)-1:
+                        offset = sum(dur(p) for p in paths[:i+1]) - overlap*(i+1)
+
+                cmd = ['ffmpeg','-y',*inputs,'-filter_complex',';'.join(filters),
+                      '-map',f'[{vprev}]','-c:v','libx264','-crf','23','-preset','fast', out]
+                print("Chạy FFmpeg để merge video...")
+                subprocess.run(cmd, check=True)
+
+            # Lấy tất cả video mp4 trong thư mục, sắp xếp theo tên
+            videos = [os.path.join(video_dir, f) for f in os.listdir(video_dir) if f.endswith('.mp4')]
+            videos.sort()
+
+            # Tên file output
+            output_file = '${{ github.event.inputs.output_file }}'
+
+            # Merge video
+            render(videos, overlap=1, out=output_file)
+          EOF
